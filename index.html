@@ -564,6 +564,12 @@
     let currentResults = null;
     let allScans = [];
     let dataSdkReady = false;
+    let currentImageDataUrl = null; // Image data URL for upload (no base64 in payload)
+
+    // Backend API – NestJS server (ScansController)
+    const BACKEND_API_BASE = 'http://localhost:7000';
+    const BACKEND_UPLOAD_ROUTE = ''; // optional: set to '/api/upload' if you add image upload endpoint
+    const BACKEND_SCANS_ROUTE = '/scan/image';  // POST JSON → ScansController.create (CreateScanDto)
 
     // AI Chat Knowledge Base
     const knowledgeBase = {
@@ -715,6 +721,7 @@
 
       const reader = new FileReader();
       reader.onload = (e) => {
+        currentImageDataUrl = e.target.result; // Store for backend payload
         document.getElementById('scan-image').src = e.target.result;
         document.getElementById('upload-zone').classList.add('hidden');
         document.getElementById('scan-viewer').classList.remove('hidden');
@@ -995,8 +1002,93 @@
       const reportHtml = results.report.map(line => `<div>${line}</div>`).join('');
       document.getElementById('detailed-report').innerHTML = reportHtml;
 
+      // Send image + full payload to your backend (route: POST /api/scans)
+      sendPayloadToBackend(results, time);
+
       // Save to Canva Sheet
       saveScanToDatabase(results, time);
+    }
+
+    /**
+     * 1) Upload image to backend (backend saves file, returns imagePath).
+     * 2) Send analysis payload with imagePath only (no base64).
+     */
+    async function sendPayloadToBackend(results, processingTime) {
+      const base = (BACKEND_API_BASE || '').replace(/([^:]\/)\/+/g, '$1');
+      const uploadUrl = base + BACKEND_UPLOAD_ROUTE;
+      const scansUrl = base + BACKEND_SCANS_ROUTE;
+
+      let imagePath = null;
+
+      // Step 1 (optional): Upload image if BACKEND_UPLOAD_ROUTE is set; backend returns imagePath
+      if (BACKEND_UPLOAD_ROUTE && currentImageDataUrl && typeof currentImageDataUrl === 'string') {
+        try {
+          const blob = await dataUrlToBlob(currentImageDataUrl);
+          const filename = `scan_${Date.now()}.png`;
+          const form = new FormData();
+          form.append('image', blob, filename);
+
+          const uploadRes = await fetch(uploadUrl, {
+            method: 'POST',
+            body: form
+          });
+
+          if (uploadRes.ok) {
+            const data = await uploadRes.json();
+            imagePath = data.imagePath || data.path || data.filePath || filename;
+          } else {
+            const errText = await uploadRes.text();
+            console.error('Upload error:', uploadRes.status, errText);
+            addAIMessage(`⚠️ Image upload failed (${uploadRes.status}). Payload sent without image path.`);
+          }
+        } catch (err) {
+          console.error('Upload failed:', err);
+          addAIMessage(`⚠️ Could not upload image: ${err.message}`);
+        }
+      }
+
+      // Step 2: Send payload with imagePath only (no base64)
+      const payload = {
+        imagePath,
+        scan_id: 'SCAN-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        patient_id: 'P-' + Math.floor(Math.random() * 10000).toString().padStart(4, '0'),
+        scan_type: 'T2-FLAIR MRI',
+        detected: results.detected,
+        confidence: parseFloat(results.confidence),
+        location: results.location,
+        grade: results.grade,
+        volume: parseFloat(results.volume) || 0,
+        max_diameter: parseFloat(results.maxDiameter) || 0,
+        processing_time: parseFloat(processingTime),
+        reason: results.reason,
+        report: results.report,
+        report_text: results.report.join(' | ')
+      };
+
+      try {
+        const res = await fetch(scansUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          console.log('Scan saved:', data);
+          addAIMessage('✅ Scan result saved to backend successfully.');
+        } else {
+          const errText = await res.text();
+          console.error('Backend error:', res.status, errText);
+          addAIMessage(`⚠️ Backend returned ${res.status}: ${errText.slice(0, 100)}`);
+        }
+      } catch (err) {
+        console.error('Failed to send payload to backend:', err);
+        addAIMessage(`⚠️ Could not reach backend: ${err.message}`);
+      }
+    }
+
+    function dataUrlToBlob(dataUrl) {
+      return fetch(dataUrl).then(r => r.blob());
     }
 
     async function saveScanToDatabase(results, processingTime) {
@@ -1068,6 +1160,7 @@
       document.getElementById('detection-markers').innerHTML = '';
       document.getElementById('file-input').value = '';
       currentResults = null;
+      currentImageDataUrl = null;
       analysisInProgress = false;
       
       addAIMessage("Analysis cleared. Upload a new MRI scan whenever you're ready for another deep learning analysis. I'm here to help interpret the results!");
